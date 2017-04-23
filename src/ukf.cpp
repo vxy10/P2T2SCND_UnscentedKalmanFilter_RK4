@@ -8,6 +8,39 @@ using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using std::vector;
 
+float Z1_prev = 0;
+
+
+
+VectorXd SystemDynamics(VectorXd x, VectorXd nu){
+
+    // System dynamics for RK4 method
+    // All integration is done numerically.
+
+    int n_x = 5;
+    int n_nu = 2;
+
+    double px =  x(0);
+    double py =  x(1);
+    double  v =  x(2);
+    double psi = x(3);
+    double dpsi =x(4);
+    double va =  nu(0);
+    double vp =  nu(1);
+
+
+    VectorXd fx = VectorXd(n_x);
+    fx.setZero();
+
+    fx << v*cos(psi),
+              v*sin(psi),
+              va,
+              dpsi,
+              vp;
+
+    return fx;
+}
+
 // function for state Prediction
 VectorXd StatePredict(VectorXd x, double dt){
 
@@ -27,7 +60,7 @@ VectorXd StatePredict(VectorXd x, double dt){
     VectorXd fx = VectorXd(n_x);
     fx.setZero();
 
-    if (fabs(dpsi)<0.001){
+    if (fabs(dpsi)<0.01){
 
         fx << v*cos(psi)*dt + 1.0/2.0*dt2*cos(psi)*va,
               v*sin(psi)*dt + 1.0/2.0*dt2*sin(psi)*va,
@@ -48,6 +81,43 @@ VectorXd StatePredict(VectorXd x, double dt){
 }
 
 
+
+
+
+// function for state Prediction
+VectorXd StatePredict_RK4(VectorXd x, double dt){
+    // RK4 integration
+    //
+
+    int n_x = 5;
+    int n_nu = 2;
+    VectorXd x_pl = VectorXd(n_x);
+    VectorXd k1 = VectorXd(n_x);
+    VectorXd k2 = VectorXd(n_x);
+    VectorXd k3 = VectorXd(n_x);
+    VectorXd k4 = VectorXd(n_x);
+
+    VectorXd nu = VectorXd(n_nu);
+
+    x_pl.setZero();
+    k1.setZero();
+    k2.setZero();
+    k3.setZero();
+    k4.setZero();
+    nu.setZero();
+    nu(0) = x(5);
+    nu(1) = x(6);
+
+    k1 = dt*SystemDynamics(x.head(n_x),nu);
+    k2 = dt*SystemDynamics(x.head(n_x)+k1/2.0f,nu);
+    k3 = dt*SystemDynamics(x.head(n_x)+k2/2.0f,nu);
+    k4 = dt*SystemDynamics(x.head(n_x)+k3,nu);
+
+    x_pl = x.head(n_x) + 1/6.0f*(k1+2.0f*k2+2.0f*k3+k4);
+    return x_pl;
+}
+
+
 // Radar measurement function
 VectorXd MeasurementFRadar(VectorXd x){
     double  px = x(0);
@@ -63,10 +133,11 @@ VectorXd MeasurementFRadar(VectorXd x){
       Z(0) = sqrt(px*px+py*py);
       Z(1) = atan2(py,px);
       Z(2) = (px*v*cos(psi) + py*v*sin(psi))/Z(0);
+      Z1_prev = Z(1);
       return Z;
   } else {
     Z(0) = sqrt(0.001);
-    Z(1) = atan2(0.001,0.001);
+    Z(1) = 0;
     Z(2) = (px*v*cos(psi) + py*v*sin(psi))/Z(0);
     return Z;
   }
@@ -122,7 +193,7 @@ UKF::UKF() {
   std_a_ = 5;
 
   // Process noise standard deviation yaw acceleration in rad/s^2
-  std_yawdd_ = 1;
+  std_yawdd_ = 3;
 
   // Laser measurement noise standard deviation position1 in m
   std_laspx_ = 0.15;
@@ -184,7 +255,7 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
       x_(2) = drho; // Approximate value as dth is not known
       x_(3) = psi; // Approximate value as dth is not known
       x_(4) = 0; // Approximate value as dth is not known
-      if (fabs(rho)>0.001){
+      if (fabs(rho)>0.01){
         is_initialized_ = true;
       }
     }
@@ -219,7 +290,7 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
   //cout << "dt = " << dt <<endl<<endl;
 
   //Use small dt to allow for turn effect
-  const double diff_t = 0.1;
+  const double diff_t = 0.01;
 
   while (dt > diff_t){
 		    Prediction(diff_t);
@@ -229,19 +300,28 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
 
 
 
+
+
+
+
+
   //cout << "x_ = " << x_<<endl<<endl;
 
   if (meas_package.sensor_type_ == MeasurementPackage::RADAR) {
 
     if (fabs(meas_package.raw_measurements_(0))>0.001){
-      UpdateRadar(meas_package);
+      if (use_radar_){
+        UpdateRadar(meas_package);
+      }
     }
 
   } else if (meas_package.sensor_type_ == MeasurementPackage::LASER){
       double l_px = meas_package.raw_measurements_(0);
       double l_py = meas_package.raw_measurements_(1);
       if (sqrt(pow(l_px,2)+pow(l_py,2))>0.001){
-        UpdateLidar(meas_package);
+        if (use_laser_){
+          UpdateLidar(meas_package);
+        }
       }
   }
 
@@ -286,10 +366,10 @@ void UKF::Prediction(double delta_t) {
 
   //create matrix with predicted sigma points as columns
   MatrixXd Xsig_pred = MatrixXd(n_x_, 2 * n_aug_ + 1);
-  Xsig_pred.col(0) = StatePredict(Xsig_aug.col(0),delta_t);
+  Xsig_pred.col(0) = StatePredict_RK4(Xsig_aug.col(0),delta_t);
   for (int i=1;i<=n_aug_;i++){
-    Xsig_pred.col(i) = StatePredict(Xsig_aug.col(i),delta_t);
-    Xsig_pred.col(i+n_aug_) = StatePredict(Xsig_aug.col(i+n_aug_),delta_t);
+    Xsig_pred.col(i) = StatePredict_RK4(Xsig_aug.col(i),delta_t);
+    Xsig_pred.col(i+n_aug_) = StatePredict_RK4(Xsig_aug.col(i+n_aug_),delta_t);
   }
 
   VectorXd weights = VectorXd(2*n_aug_+1);
